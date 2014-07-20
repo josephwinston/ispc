@@ -1,4 +1,4 @@
-;;  Copyright (c) 2010-2012, Intel Corporation
+;;  Copyright (c) 2010-2014, Intel Corporation
 ;;  All rights reserved.
 ;;
 ;;  Redistribution and use in source and binary forms, with or without
@@ -194,6 +194,7 @@ declare float @__rcp_uniform_float(float) nounwind readnone
 declare float @__sqrt_uniform_float(float) nounwind readnone 
 declare <WIDTH x float> @__rcp_varying_float(<WIDTH x float>) nounwind readnone 
 declare <WIDTH x float> @__rsqrt_varying_float(<WIDTH x float>) nounwind readnone 
+
 declare <WIDTH x float> @__sqrt_varying_float(<WIDTH x float>) nounwind readnone 
 
 declare double @__sqrt_uniform_double(double) nounwind readnone
@@ -371,6 +372,8 @@ declare i32 @__packed_load_active(i32 * nocapture, <WIDTH x i32> * nocapture,
                                   <WIDTH x i1>) nounwind
 declare i32 @__packed_store_active(i32 * nocapture, <WIDTH x i32> %vals,
                                    <WIDTH x i1>) nounwind
+declare i32 @__packed_store_active2(i32 * nocapture, <WIDTH x i32> %vals,
+                                   <WIDTH x i1>) nounwind
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -386,3 +389,11 @@ declare void @__prefetch_read_uniform_nt(i8 * nocapture) nounwind
 
 define_avgs()
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; reciprocals in double precision, if supported
+
+rsqrtd_decl()
+rcpd_decl()
+
+transcendetals_decl()
+trigonometry_decl()

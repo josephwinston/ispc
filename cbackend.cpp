@@ -63,7 +63,20 @@
 #include "llvm/Analysis/ConstantsScanner.h"
 #include "llvm/Analysis/FindUsedTypes.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include "llvm/Analysis/Verifier.h"
+#if defined(LLVM_3_5)
+    #include "llvm/IR/Verifier.h"
+    #include <llvm/IR/IRPrintingPasses.h>
+    #include "llvm/IR/CallSite.h"
+    #include "llvm/IR/CFG.h"
+    #include "llvm/IR/GetElementPtrTypeIterator.h"
+    #include "llvm/Support/FileSystem.h"
+#else
+    #include "llvm/Analysis/Verifier.h"
+    #include <llvm/Assembly/PrintModulePass.h>
+    #include "llvm/Support/CallSite.h"
+    #include "llvm/Support/CFG.h"
+    #include "llvm/Support/GetElementPtrTypeIterator.h"
+#endif
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/IntrinsicLowering.h"
@@ -76,22 +89,19 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
-#if defined(LLVM_3_1)
-  #include "llvm/Target/TargetData.h"
-#elif defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include "llvm/DataLayout.h"
 #else // LLVM 3.3+
   #include "llvm/IR/DataLayout.h"
 #endif
-#include "llvm/Support/CallSite.h"
-#include "llvm/Support/CFG.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormattedStream.h"
-#include "llvm/Support/GetElementPtrTypeIterator.h"
 #if defined(LLVM_3_1) || defined(LLVM_3_2)
   #include "llvm/Support/InstVisitor.h"
-#else // LLVM 3.3+
+#elif defined (LLVM_3_3) || defined (LLVM_3_4)
   #include "llvm/InstVisitor.h"
+#else // LLVM 3.5+
+  #include "llvm/IR/InstVisitor.h"
 #endif
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/TargetRegistry.h"
@@ -102,7 +112,6 @@
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Support/ToolOutputFile.h>
-#include <llvm/Assembly/PrintModulePass.h>
 #include <algorithm>
 // Some ms header decided to define setjmp as _setjmp, undo this for this file.
 #ifdef _MSC_VER
@@ -241,7 +250,9 @@ namespace {
   class CBEMCAsmInfo : public llvm::MCAsmInfo {
   public:
     CBEMCAsmInfo() {
+#if !defined(LLVM_3_5)
       GlobalPrefix = "";
+#endif
       PrivateGlobalPrefix = "";
     }
   };
@@ -454,7 +465,11 @@ namespace {
 
       // Must not be used in inline asm, extractelement, or shufflevector.
       if (I.hasOneUse()) {
+#if defined(LLVM_3_5)
+        const llvm::Instruction &User = llvm::cast<llvm::Instruction>(*I.user_back());
+#else
         const llvm::Instruction &User = llvm::cast<llvm::Instruction>(*I.use_back());
+#endif
         if (isInlineAsm(User) || llvm::isa<llvm::ExtractElementInst>(User) ||
             llvm::isa<llvm::ShuffleVectorInst>(User) || llvm::isa<llvm::AtomicRMWInst>(User) ||
             llvm::isa<llvm::AtomicCmpXchgInst>(User))
@@ -462,7 +477,11 @@ namespace {
       }
 
       // Only inline instruction it if it's use is in the same BB as the inst.
+#if defined(LLVM_3_5)
+      return I.getParent() == llvm::cast<llvm::Instruction>(I.user_back())->getParent();
+#else
       return I.getParent() == llvm::cast<llvm::Instruction>(I.use_back())->getParent();
+#endif
     }
 
     // isDirectAlloca - Define fixed sized allocas in the entry block as direct
@@ -656,7 +675,7 @@ void CWriter::printStructReturnPointerFunctionType(llvm::raw_ostream &Out,
 llvm::raw_ostream &
 CWriter::printSimpleType(llvm::raw_ostream &Out, llvm::Type *Ty, bool isSigned,
                          const std::string &NameSoFar) {
-  assert((Ty->isPrimitiveType() || Ty->isIntegerTy() || Ty->isVectorTy()) &&
+  assert((Ty->isFloatingPointTy() || Ty->isX86_MMXTy() || Ty->isIntegerTy() || Ty->isVectorTy() || Ty->isVoidTy()) &&
          "Invalid type for printSimpleType");
   switch (Ty->getTypeID()) {
   case llvm::Type::VoidTyID:   return Out << "void " << NameSoFar;
@@ -752,7 +771,7 @@ llvm::raw_ostream &CWriter::printType(llvm::raw_ostream &Out, llvm::Type *Ty,
 #endif
                                       ) {
 
-  if (Ty->isPrimitiveType() || Ty->isIntegerTy() || Ty->isVectorTy()) {
+  if (Ty->isFloatingPointTy() || Ty->isX86_MMXTy() || Ty->isIntegerTy() || Ty->isVectorTy() || Ty->isVoidTy()) {
     printSimpleType(Out, Ty, isSigned, NameSoFar);
     return Out;
   }
@@ -1455,7 +1474,7 @@ void CWriter::printConstant(llvm::Constant *CPV, bool Static) {
         char Buffer[100];
 
         uint64_t ll = llvm::DoubleToBits(V);
-        sprintf(Buffer, "0x%"PRIx64, ll);
+        sprintf(Buffer, "0x%" PRIx64, ll);
 
         std::string Num(&Buffer[0], &Buffer[6]);
         unsigned long Val = strtoul(Num.c_str(), 0, 16);
@@ -1751,7 +1770,11 @@ std::string CWriter::GetValueName(const llvm::Value *Operand) {
 
   // Resolve potential alias.
   if (const llvm::GlobalAlias *GA = llvm::dyn_cast<llvm::GlobalAlias>(Operand)) {
+#if defined(LLVM_3_5)
+    if (const llvm::Value *V = GA->getAliasee())
+#else
     if (const llvm::Value *V = GA->resolveAliasedGlobal(false))
+#endif
       Operand = V;
   }
 
@@ -2140,7 +2163,13 @@ static SpecialGlobalClass getGlobalVariableClass(const llvm::GlobalVariable *GV)
 
   // Otherwise, if it is other metadata, don't print it.  This catches things
   // like debug information.
+#if defined(LLVM_3_5)
+  // Here we compare char *
+  if (!strcmp(GV->getSection(), "llvm.metadata"))
+#else
+  // Here we compare strings
   if (GV->getSection() == "llvm.metadata")
+#endif
     return NotPrinted;
 
   return NotSpecial;
@@ -2196,7 +2225,7 @@ bool CWriter::doInitialization(llvm::Module &M) {
 #endif
   TAsm = new CBEMCAsmInfo();
   MRI  = new llvm::MCRegisterInfo();
-#if defined(LLVM_3_4)
+#if defined(LLVM_3_4) || defined(LLVM_3_5)
   TCtx = new llvm::MCContext(TAsm, MRI, NULL);
 #else
   TCtx = new llvm::MCContext(*TAsm, *MRI, NULL);
@@ -2320,7 +2349,11 @@ bool CWriter::doInitialization(llvm::Module &M) {
       if (I->hasExternalLinkage() || I->hasExternalWeakLinkage() ||
           I->hasCommonLinkage())
         Out << "extern ";
+#if defined (LLVM_3_5)
+      else if (I->hasDLLImportStorageClass())
+#else
       else if (I->hasDLLImportLinkage())
+#endif
         Out << "__declspec(dllimport) ";
       else
         continue; // Internal Global
@@ -2492,11 +2525,13 @@ bool CWriter::doInitialization(llvm::Module &M) {
 
         if (I->hasLocalLinkage())
           Out << "static ";
-        else if (I->hasDLLImportLinkage())
-          Out << "__declspec(dllimport) ";
-        else if (I->hasDLLExportLinkage())
-          Out << "__declspec(dllexport) ";
-
+#if defined(LLVM_3_5)
+        else if (I->hasDLLImportStorageClass()) Out << "__declspec(dllimport) ";
+        else if (I->hasDLLExportStorageClass()) Out << "__declspec(dllexport) ";
+#else
+        else if (I->hasDLLImportLinkage()) Out << "__declspec(dllimport) ";
+        else if (I->hasDLLExportLinkage()) Out << "__declspec(dllexport) ";
+#endif
         // Thread Local Storage
         if (I->isThreadLocal())
           Out << "__thread ";
@@ -2733,7 +2768,7 @@ void CWriter::printModuleTypes() {
 void CWriter::printContainedStructs(llvm::Type *Ty,
                                     llvm::SmallPtrSet<llvm::Type *, 16> &Printed) {
   // Don't walk through pointers.
-  if (Ty->isPointerTy() || Ty->isPrimitiveType() || Ty->isIntegerTy())
+  if (!(Ty->isStructTy() || Ty->isArrayTy()))
     return;
 
   // Print all contained types first.
@@ -2775,8 +2810,13 @@ void CWriter::printFunctionSignature(const llvm::Function *F, bool Prototype) {
   bool isStructReturn = F->hasStructRetAttr();
 
   if (F->hasLocalLinkage()) Out << "static ";
+#if defined(LLVM_3_5)
+  if (F->hasDLLImportStorageClass()) Out << "__declspec(dllimport) ";
+  if (F->hasDLLExportStorageClass()) Out << "__declspec(dllexport) ";
+#else
   if (F->hasDLLImportLinkage()) Out << "__declspec(dllimport) ";
   if (F->hasDLLExportLinkage()) Out << "__declspec(dllexport) ";
+#endif
   switch (F->getCallingConv()) {
    case llvm::CallingConv::X86_StdCall:
     Out << "__attribute__((stdcall)) ";
@@ -3105,7 +3145,11 @@ void CWriter::visitSwitchInst(llvm::SwitchInst &SI) {
     Out << ":\n";
     printPHICopiesForSuccessor (SI.getParent(), Succ, 2);
     printBranchToBlock(SI.getParent(), Succ, 2);
+#if defined (LLVM_3_5)
+    if (llvm::Function::iterator(Succ) == std::next(llvm::Function::iterator(SI.getParent())))
+#else
     if (llvm::Function::iterator(Succ) == llvm::next(llvm::Function::iterator(SI.getParent())))
+#endif
       Out << "    break;\n";
   }
 
@@ -3126,7 +3170,11 @@ bool CWriter::isGotoCodeNecessary(llvm::BasicBlock *From, llvm::BasicBlock *To) 
   /// FIXME: This should be reenabled, but loop reordering safe!!
   return true;
 
+#if defined (LLVM_3_5)
+  if (std::next(llvm::Function::iterator(From)) != llvm::Function::iterator(To))
+#else
   if (llvm::next(llvm::Function::iterator(From)) != llvm::Function::iterator(To))
+#endif
     return true;  // Not the direct successor, we need a goto.
 
   //llvm::isa<llvm::SwitchInst>(From->getTerminator())
@@ -3245,10 +3293,16 @@ void CWriter::visitBinaryOperator(llvm::Instruction &I) {
       if ((I.getOpcode() == llvm::Instruction::Shl ||
            I.getOpcode() == llvm::Instruction::LShr ||
            I.getOpcode() == llvm::Instruction::AShr)) {
-          if (LLVMVectorValuesAllEqual(I.getOperand(1))) {
-              Out << "__extract_element(";
-              writeOperand(I.getOperand(1));
-              Out << ", 0) ";
+          llvm::Value *splat = NULL;
+          if (LLVMVectorValuesAllEqual(I.getOperand(1), &splat)) {
+              if (splat) {
+                  // Avoid __extract_element(splat(value), 0), if possible.
+                  writeOperand(splat);
+              } else {
+                  Out << "__extract_element(";
+                  writeOperand(I.getOperand(1));
+                  Out << ", 0) ";
+              }
           }
           else
               writeOperand(I.getOperand(1));
@@ -3734,7 +3788,11 @@ void CWriter::lowerIntrinsics(llvm::Function &F) {
             // All other intrinsic calls we must lower.
             llvm::Instruction *Before = 0;
             if (CI != &BB->front())
+#if defined(LLVM_3_5)
+              Before = std::prev(llvm::BasicBlock::iterator(CI));
+#else
               Before = prior(llvm::BasicBlock::iterator(CI));
+#endif
 
             IL->LowerIntrinsicCall(CI);
             if (Before) {        // Move iterator to instruction after call

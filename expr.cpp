@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2013, Intel Corporation
+  Copyright (c) 2010-2014, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -74,8 +74,11 @@
   #include <llvm/IR/CallingConv.h>
 #endif
 #include <llvm/ExecutionEngine/GenericValue.h>
-#include <llvm/Support/InstIterator.h>
-
+#if defined(LLVM_3_5)
+  #include <llvm/IR/InstIterator.h>
+#else
+  #include <llvm/Support/InstIterator.h>
+#endif
 
 /////////////////////////////////////////////////////////////////////////////////////
 // Expr
@@ -206,14 +209,14 @@ lDoTypeConv(const Type *fromType, const Type *toType, Expr **expr,
     if (Type::Equal(toType, fromType))
         return true;
 
-    if (Type::Equal(fromType, AtomicType::Void)) {
+    if (fromType->IsVoidType()) {
         if (!failureOk)
             Error(pos, "Can't convert from \"void\" to \"%s\" for %s.",
                   toType->GetString().c_str(), errorMsgBase);
         return false;
     }
 
-    if (Type::Equal(toType, AtomicType::Void)) {
+    if (toType->IsVoidType()) {
         if (!failureOk)
             Error(pos, "Can't convert type \"%s\" to \"void\" for %s.",
                   fromType->GetString().c_str(), errorMsgBase);
@@ -339,7 +342,15 @@ lDoTypeConv(const Type *fromType, const Type *toType, Expr **expr,
             return false;
         }
         else if (PointerType::IsVoidPointer(toPointerType)) {
+          if (fromPointerType->GetBaseType()->IsConstType() &&
+              !(toPointerType->GetBaseType()->IsConstType())) {
+            if (!failureOk)
+              Error(pos, "Can't convert pointer to const \"%s\" to void pointer.",
+                    fromPointerType->GetString().c_str());
+            return false;
+          }
             // any pointer type can be converted to a void *
+            // ...almost. #731
             goto typecast_ok;
         }
         else if (PointerType::IsVoidPointer(fromPointerType) &&
@@ -3551,11 +3562,18 @@ SelectExpr::Print() const {
 // FunctionCallExpr
 
 FunctionCallExpr::FunctionCallExpr(Expr *f, ExprList *a, SourcePos p,
-                                   bool il, Expr *lce)
+                                   bool il, Expr *lce[3])
     : Expr(p), isLaunch(il) {
     func = f;
     args = a;
-    launchCountExpr = lce;
+    if (lce != NULL)
+    {
+      launchCountExpr[0] = lce[0];
+      launchCountExpr[1] = lce[1];
+      launchCountExpr[2] = lce[2];
+    }
+    else
+      launchCountExpr[0] = launchCountExpr[1] = launchCountExpr[2] = NULL;
 }
 
 
@@ -3594,7 +3612,7 @@ FunctionCallExpr::GetValue(FunctionEmitContext *ctx) const {
 
     const FunctionType *ft = lGetFunctionType(func);
     AssertPos(pos, ft != NULL);
-    bool isVoidFunc = Type::Equal(ft->GetReturnType(), AtomicType::Void);
+    bool isVoidFunc = ft->GetReturnType()->IsVoidType();
 
     // Automatically convert function call args to references if needed.
     // FIXME: this should move to the TypeCheck() method... (but the
@@ -3673,9 +3691,13 @@ FunctionCallExpr::GetValue(FunctionEmitContext *ctx) const {
     llvm::Value *retVal = NULL;
     ctx->SetDebugPos(pos);
     if (ft->isTask) {
-        AssertPos(pos, launchCountExpr != NULL);
-        llvm::Value *launchCount = launchCountExpr->GetValue(ctx);
-        if (launchCount != NULL)
+        AssertPos(pos, launchCountExpr[0] != NULL);
+        llvm::Value *launchCount[3] = 
+        { launchCountExpr[0]->GetValue(ctx),
+          launchCountExpr[1]->GetValue(ctx),
+          launchCountExpr[2]->GetValue(ctx) };
+
+        if (launchCount[0] != NULL)
             ctx->LaunchInst(callee, argVals, launchCount);
     }
     else
@@ -3798,14 +3820,17 @@ FunctionCallExpr::TypeCheck() {
             if (!isLaunch)
                 Error(pos, "\"launch\" expression needed to call function "
                       "with \"task\" qualifier.");
-            if (!launchCountExpr)
+            for (int k = 0; k < 3; k++)
+            {
+              if (!launchCountExpr[k])
                 return NULL;
 
-            launchCountExpr =
-                TypeConvertExpr(launchCountExpr, AtomicType::UniformInt32,
-                                "task launch count");
-            if (launchCountExpr == NULL)
+              launchCountExpr[k] =
+                TypeConvertExpr(launchCountExpr[k], AtomicType::UniformInt32,
+                    "task launch count");
+              if (launchCountExpr[k] == NULL)
                 return NULL;
+            }
         }
         else {
             if (isLaunch) {
@@ -3813,7 +3838,7 @@ FunctionCallExpr::TypeCheck() {
                       "qualified function.");
                 return NULL;
             }
-            AssertPos(pos, launchCountExpr == NULL);
+            AssertPos(pos, launchCountExpr[0] == NULL);
         }
     }
     else {
@@ -3874,7 +3899,7 @@ FunctionCallExpr::TypeCheck() {
 
         if (fptrType->IsVaryingType()) {
             const Type *retType = funcType->GetReturnType();
-            if (Type::Equal(retType, AtomicType::Void) == false &&
+            if (retType->IsVoidType() == false &&
                 retType->IsUniformType()) {
                 Error(pos, "Illegal to call a varying function pointer that "
                       "points to a function with a uniform return type \"%s\".",
@@ -4582,7 +4607,7 @@ IndexExpr::TypeCheck() {
 
     if (!CastType<SequentialType>(baseExprType->GetReferenceTarget())) {
         if (const PointerType *pt = CastType<PointerType>(baseExprType)) {
-            if (Type::Equal(AtomicType::Void, pt->GetBaseType())) {
+            if (pt->GetBaseType()->IsVoidType()) {
                 Error(pos, "Illegal to dereference void pointer type \"%s\".",
                       baseExprType->GetString().c_str());
                 return NULL;
@@ -5118,9 +5143,18 @@ MemberExpr::create(Expr *e, const char *id, SourcePos p, SourcePos idpos,
                   exprType->GetString().c_str());
         return NULL;
     }
-
-    if (CastType<StructType>(exprType) != NULL)
+    if (CastType<StructType>(exprType) != NULL) {
+      const StructType *st = CastType<StructType>(exprType);
+      if (st->IsDefined()) { 
         return new StructMemberExpr(e, id, p, idpos, derefLValue);
+      }
+      else {
+        Error(p, "Member operator \"%s\" can't be applied to declared "
+              "struct \"%s\" containing an undefined struct type.", derefLValue ? "->" : ".",
+              exprType->GetString().c_str());
+        return NULL;
+      }
+    }
     else if (CastType<VectorType>(exprType) != NULL)
         return new VectorMemberExpr(e, id, p, idpos, derefLValue);
     else if (CastType<UndefinedStructType>(exprType)) {
@@ -6173,10 +6207,10 @@ ConstExpr::Print() const {
             printf("%f", floatVal[i]);
             break;
         case AtomicType::TYPE_INT64:
-            printf("%"PRId64, int64Val[i]);
+            printf("%" PRId64, int64Val[i]);
             break;
         case AtomicType::TYPE_UINT64:
-            printf("%"PRIu64, uint64Val[i]);
+            printf("%" PRIu64, uint64Val[i]);
             break;
         case AtomicType::TYPE_DOUBLE:
             printf("%f", doubleVal[i]);
@@ -6776,7 +6810,7 @@ TypeCastExpr::GetValue(FunctionEmitContext *ctx) const {
         return NULL;
     }
 
-    if (Type::Equal(toType, AtomicType::Void)) {
+    if (toType->IsVoidType()) {
         // emit the code for the expression in case it has side-effects but
         // then we're done.
         (void)expr->GetValue(ctx);
@@ -6948,9 +6982,9 @@ TypeCastExpr::GetValue(FunctionEmitContext *ctx) const {
             return ctx->BitCastInst(v, ptype); //, "array_cast_0size");
         }
 
-        AssertPos(pos, Type::Equal(toTarget, fromTarget) ||
-               Type::Equal(toTarget, fromTarget->GetAsConstType()));
-        return expr->GetValue(ctx);
+        // Just bitcast it.  See Issue #721
+        llvm::Value *value = expr->GetValue(ctx);
+        return ctx->BitCastInst(value, toType->LLVMType(g->ctx), "refcast");
     }
 
     const StructType *toStruct = CastType<StructType>(toType);
@@ -7139,10 +7173,10 @@ TypeCastExpr::TypeCheck() {
     toType = lDeconstifyType(toType);
 
     // Anything can be cast to void...
-    if (Type::Equal(toType, AtomicType::Void))
+    if (toType->IsVoidType())
         return this;
 
-    if (Type::Equal(fromType, AtomicType::Void) ||
+    if (fromType->IsVoidType() ||
         (fromType->IsVaryingType() && toType->IsUniformType())) {
         Error(pos, "Can't type cast from type \"%s\" to type \"%s\"",
               fromType->GetString().c_str(), toType->GetString().c_str());
@@ -7156,6 +7190,14 @@ TypeCastExpr::TypeCheck() {
         // allow explicit typecasts between any two different pointer types
         return this;
 
+    const ReferenceType *fromRef = CastType<ReferenceType>(fromType);
+    const ReferenceType *toRef = CastType<ReferenceType>(toType);
+    if (fromRef != NULL && toRef != NULL) {
+      // allow explicit typecasts between any two different reference types
+      // Issues #721
+      return this;
+    }
+    
     const AtomicType *fromAtomic = CastType<AtomicType>(fromType);
     const AtomicType *toAtomic = CastType<AtomicType>(toType);
     const EnumType *fromEnum = CastType<EnumType>(fromType);
@@ -7557,7 +7599,7 @@ PtrDerefExpr::TypeCheck() {
     }
 
     if (const PointerType *pt = CastType<PointerType>(type)) {
-        if (Type::Equal(AtomicType::Void, pt->GetBaseType())) {
+        if (pt->GetBaseType()->IsVoidType()) {
             Error(pos, "Illegal to dereference void pointer type \"%s\".",
                   type->GetString().c_str());
             return NULL;
@@ -8058,23 +8100,6 @@ lGetOverloadCandidateMessage(const std::vector<Symbol *> &funcs,
 }
 
 
-static bool
-lIsMatchToNonConstReference(const Type *callType, const Type *funcArgType) {
-    return (CastType<ReferenceType>(funcArgType) &&
-            (funcArgType->IsConstType() == false) &&
-            Type::Equal(callType, funcArgType->GetReferenceTarget()));
-}
-
-
-static bool
-lIsMatchToNonConstReferenceUnifToVarying(const Type *callType,
-                                         const Type *funcArgType) {
-    return (CastType<ReferenceType>(funcArgType) &&
-            (funcArgType->IsConstType() == false) &&
-            Type::Equal(callType->GetAsVaryingType(),
-                        funcArgType->GetReferenceTarget()));
-}
-
 /** Helper function used for function overload resolution: returns true if
     converting the argument to the call type only requires a type
     conversion that won't lose information.  Otherwise return false.
@@ -8118,31 +8143,6 @@ lIsMatchWithTypeWidening(const Type *callType, const Type *funcArgType) {
         FATAL("Unhandled atomic type");
         return false;
     }
-}
-
-
-/** Helper function used for function overload resolution: returns true if
-    the call argument type and the function argument type match if we only
-    do a uniform -> varying type conversion but otherwise have exactly the
-    same type.
- */
-static bool
-lIsMatchWithUniformToVarying(const Type *callType, const Type *funcArgType) {
-    return (callType->IsUniformType() &&
-            funcArgType->IsVaryingType() &&
-            Type::EqualIgnoringConst(callType->GetAsVaryingType(), funcArgType));
-}
-
-
-/** Helper function used for function overload resolution: returns true if
-    we can type convert from the call argument type to the function
-    argument type, but without doing a uniform -> varying conversion.
- */
-static bool
-lIsMatchWithTypeConvSameVariability(const Type *callType,
-                                    const Type *funcArgType) {
-    return (CanConvertTypes(callType, funcArgType) &&
-            (callType->GetVariability() == funcArgType->GetVariability()));
 }
 
 
@@ -8197,13 +8197,15 @@ int
 FunctionSymbolExpr::computeOverloadCost(const FunctionType *ftype,
                                         const std::vector<const Type *> &argTypes,
                                         const std::vector<bool> *argCouldBeNULL,
-                                        const std::vector<bool> *argIsConstant) {
+                                        const std::vector<bool> *argIsConstant,
+                                        int * cost) {
     int costSum = 0;
 
     // In computing the cost function, we only worry about the actual
     // argument types--using function default parameter values is free for
     // the purposes here...
     for (int i = 0; i < (int)argTypes.size(); ++i) {
+        cost[i] = 0;
         // The cost imposed by this argument will be a multiple of
         // costScale, which has a value set so that for each of the cost
         // buckets, even if all of the function arguments undergo the next
@@ -8216,51 +8218,105 @@ FunctionSymbolExpr::computeOverloadCost(const FunctionType *ftype,
 
         if (Type::Equal(callType, fargType))
             // Perfect match: no cost
-            costSum += 0;
+            // Step "1" from documentation
+            cost[i] += 0;
         else if (argCouldBeNULL && (*argCouldBeNULL)[i] &&
                  lArgIsPointerType(fargType))
-            // Passing NULL to a pointer-typed parameter is also a no-cost
-            // operation
-            costSum += 0;
+            // Passing NULL to a pointer-typed parameter is also a no-cost operation
+            // Step "1" from documentation
+            cost[i] += 0;
         else {
             // If the argument is a compile-time constant, we'd like to
             // count the cost of various conversions as much lower than the
             // cost if it wasn't--so scale up the cost when this isn't the
             // case..
             if (argIsConstant == NULL || (*argIsConstant)[i] == false)
-                costScale *= 128;
+                costScale *= 512;
 
-            // For convenience, normalize to non-const types (except for
-            // references, where const-ness matters).  For all other types,
-            // we're passing by value anyway, so const doesn't matter.
-            const Type *callTypeNC = callType, *fargTypeNC = fargType;
-            if (CastType<ReferenceType>(callType) == NULL)
-                callTypeNC = callType->GetAsNonConstType();
-            if (CastType<ReferenceType>(fargType) == NULL)
-                fargTypeNC = fargType->GetAsNonConstType();
+            if (CastType<ReferenceType>(fargType)) {
+                // Here we completely handle the case where fargType is reference.
+                if (callType->IsConstType() && !fargType->IsConstType()) {
+                    // It is forbidden to pass const object to non-const reference (cvf -> vfr)
+                    return -1;
+                }
+                if (!callType->IsConstType() && fargType->IsConstType()) {
+                    // It is possible to pass (vf -> cvfr)
+                    // but it is worse than (vf -> vfr) or (cvf -> cvfr)
+                    // Step "3" from documentation
+                    cost[i] += 2 * costScale;
+                }
+                if (!Type::Equal(callType->GetReferenceTarget()->GetAsNonConstType(),
+                                 fargType->GetReferenceTarget()->GetAsNonConstType())) {
+                    // Types under references must be equal completely.
+                    // vd -> vfr or vd -> cvfr are forbidden. (Although clang allows vd -> cvfr case.)
+                    return -1;
+                }
+                // penalty for equal types under reference (vf -> vfr is worse than vf -> vf)
+                // Step "2" from documentation
+                cost[i] += 2 * costScale;
+                continue;
+            }
+            const Type *callTypeNP = callType;
+            if (CastType<ReferenceType>(callType)) {
+                callTypeNP = callType->GetReferenceTarget();
+                // we can treat vfr as vf for callType with some penalty
+                // Step "5" from documentation
+                cost[i] += 2 * costScale;
+            }
 
-            if (Type::Equal(callTypeNC, fargTypeNC))
-                // Exact match (after dealing with references, above)
-                costSum += 1 * costScale;
-            // note: orig fargType for the next two...
-            else if (lIsMatchToNonConstReference(callTypeNC, fargType))
-                costSum += 2 * costScale;
-            else if (lIsMatchToNonConstReferenceUnifToVarying(callTypeNC, fargType))
-                costSum += 4 * costScale;
-            else if (lIsMatchWithTypeWidening(callTypeNC, fargTypeNC))
-                costSum += 8 * costScale;
-            else if (lIsMatchWithUniformToVarying(callTypeNC, fargTypeNC))
-                costSum += 16 * costScale;
-            else if (lIsMatchWithTypeConvSameVariability(callTypeNC, fargTypeNC))
-                costSum += 32 * costScale;
-            else if (CanConvertTypes(callTypeNC, fargTypeNC))
-                costSum += 64 * costScale;
+            // Now we deal with references, so we can normalize to non-const types
+            // because we're passing by value anyway, so const doesn't matter.
+            const Type *callTypeNC = callTypeNP, *fargTypeNC = fargType;
+            callTypeNC = callTypeNP->GetAsNonConstType();
+            fargTypeNC = fargType->GetAsNonConstType();
+
+            // Now we forget about constants and references!
+            if (Type::Equal(callTypeNC, fargTypeNC)) {
+                // The best case: vf -> vf.
+                // Step "4" from documentation
+                cost[i] += 1 * costScale;
+                continue;
+            }
+            if (lIsMatchWithTypeWidening(callTypeNC, fargTypeNC)) {
+                // A little bit worse case: vf -> vd.
+                // Step "6" from documentation
+                cost[i] += 8 * costScale;
+                continue;
+            }
+            if (fargType->IsVaryingType() && callType->IsUniformType()) {
+                // Here we deal with brodcasting uniform to varying.
+                // callType - varying and fargType - uniform is forbidden.
+                if (Type::Equal(callTypeNC->GetAsVaryingType(), fargTypeNC)) {
+                    // uf -> vf is better than uf -> ui or uf -> ud
+                    // Step "7" from documentation
+                    cost[i] += 16 * costScale;
+                    continue;
+                }
+                if (lIsMatchWithTypeWidening(callTypeNC->GetAsVaryingType(), fargTypeNC)) {
+                    // uf -> vd is better than uf -> vi (128 < 128 + 64)
+                    // but worse than uf -> ui (128 > 64)
+                    // Step "9" from documentation
+                    cost[i] += 128 * costScale;
+                    continue;
+                }
+                // 128 + 64 is the max. uf -> vi is the worst case.
+                // Step "10" from documentation
+                cost[i] += 128 * costScale;
+            }
+            if (CanConvertTypes(callTypeNC, fargTypeNC))
+                // two cases: the worst is 128 + 64: uf -> vi and
+                // the only 64: (64 < 128) uf -> ui worse than uf -> vd
+                // Step "8" from documentation
+                cost[i] += 64 * costScale;
             else
                 // Failure--no type conversion possible...
                 return -1;
         }
     }
 
+    for (int i = 0; i < (int)argTypes.size(); ++i) {
+        costSum = costSum + cost[i];
+    }
     return costSum;
 }
 
@@ -8295,6 +8351,7 @@ FunctionSymbolExpr::ResolveOverloads(SourcePos argPos,
     int bestMatchCost = 1<<30;
     std::vector<Symbol *> matches;
     std::vector<int> candidateCosts;
+    std::vector<int*> candidateExpandCosts;
 
     if (actualCandidates.size() == 0)
         goto failure;
@@ -8304,9 +8361,12 @@ FunctionSymbolExpr::ResolveOverloads(SourcePos argPos,
         const FunctionType *ft =
             CastType<FunctionType>(actualCandidates[i]->type);
         AssertPos(pos, ft != NULL);
+        int * cost = new int[argTypes.size()];
         candidateCosts.push_back(computeOverloadCost(ft, argTypes,
                                                      argCouldBeNULL,
-                                                     argIsConstant));
+                                                     argIsConstant,
+                                                     cost));
+        candidateExpandCosts.push_back(cost);
     }
 
     // Find the best cost, and then the candidate or candidates that have
@@ -8319,8 +8379,28 @@ FunctionSymbolExpr::ResolveOverloads(SourcePos argPos,
     if (bestMatchCost == (1<<30))
         goto failure;
     for (int i = 0; i < (int)candidateCosts.size(); ++i) {
-        if (candidateCosts[i] == bestMatchCost)
+        if (candidateCosts[i] == bestMatchCost) {
+            for (int j = 0; j < (int)candidateCosts.size(); ++j) {
+                for (int k = 0; k < argTypes.size(); k++) {
+                    if (candidateCosts[j] != -1 &&
+                        candidateExpandCosts[j][k] < candidateExpandCosts[i][k]) {
+                        std::vector<Symbol *> temp;
+                        temp.push_back(actualCandidates[i]);
+                        temp.push_back(actualCandidates[j]);
+                        std::string candidateMessage =
+                            lGetOverloadCandidateMessage(temp, argTypes, argCouldBeNULL);
+                        Warning(pos, "call to \"%s\" is ambiguous. "
+                                    "This warning will be turned into error in the next ispc release.\n"
+                                    "Please add explicit cast to arguments to have unambiguous match."
+                                    "\n%s", funName, candidateMessage.c_str());
+                    }
+                }
+            }
             matches.push_back(actualCandidates[i]);
+        }
+    }
+    for (int i = 0; i < (int)candidateExpandCosts.size(); ++i) {
+        delete [] candidateExpandCosts[i];
     }
 
     if (matches.size() == 1) {
@@ -8635,6 +8715,12 @@ NewExpr::TypeCheck() {
     if (CastType<UndefinedStructType>(allocType) != NULL) {
         Error(pos, "Can't dynamically allocate storage for declared "
               "but not defined type \"%s\".", allocType->GetString().c_str());
+        return NULL;
+    }
+    const StructType *st = CastType<StructType>(allocType);
+    if (st != NULL && !st->IsDefined()) {
+        Error(pos, "Can't dynamically allocate storage for declared "
+              "type \"%s\" containing undefined member type.", allocType->GetString().c_str());
         return NULL;
     }
 

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2012, Intel Corporation
+  Copyright (c) 2010-2013, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -81,15 +81,15 @@ struct Variability {
 /** Enumerant that records each of the types that inherit from the Type
     baseclass. */
 enum TypeId {
-    ATOMIC_TYPE,
-    ENUM_TYPE,
-    POINTER_TYPE,
-    ARRAY_TYPE,
-    VECTOR_TYPE,
-    STRUCT_TYPE,
-    UNDEFINED_STRUCT_TYPE,
-    REFERENCE_TYPE,
-    FUNCTION_TYPE
+  ATOMIC_TYPE,           // 0
+  ENUM_TYPE,             // 1
+  POINTER_TYPE,          // 2
+  ARRAY_TYPE,            // 3
+  VECTOR_TYPE,           // 4
+  STRUCT_TYPE,           // 5
+  UNDEFINED_STRUCT_TYPE, // 6
+  REFERENCE_TYPE,        // 7
+  FUNCTION_TYPE          // 8
 };
 
 
@@ -675,6 +675,7 @@ public:
     bool IsIntType() const;
     bool IsUnsignedType() const;
     bool IsConstType() const;
+    bool IsDefined() const;
 
     const Type *GetBaseType() const;
     const StructType *GetAsVaryingType() const;
@@ -714,7 +715,8 @@ public:
     const SourcePos &GetElementPosition(int i) const { return elementPositions[i]; }
 
     /** Returns the name of the structure type.  (e.g. struct Foo -> "Foo".) */
-    const std::string &GetStructName() const { return name; }
+    const std::string &GetStructName() const  { return name; }
+    const std::string GetCStructName() const;
 
 private:
     static bool checkIfCanBeSOA(const StructType *st);
@@ -872,6 +874,7 @@ public:
     std::string GetString() const;
     std::string Mangle() const;
     std::string GetCDeclaration(const std::string &fname) const;
+    std::string GetCDeclarationForDispatch(const std::string &fname) const;
 
     llvm::Type *LLVMType(llvm::LLVMContext *ctx) const;
     llvm::DIType GetDIType(llvm::DIDescriptor scope) const;

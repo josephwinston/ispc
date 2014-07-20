@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2012, Intel Corporation
+  Copyright (c) 2010-2013, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -247,7 +247,8 @@ public:
 class FunctionCallExpr : public Expr {
 public:
     FunctionCallExpr(Expr *func, ExprList *args, SourcePos p,
-                     bool isLaunch = false, Expr *launchCountExpr = NULL);
+                     bool isLaunch = false, 
+                     Expr *launchCountExpr[3] = NULL);
 
     llvm::Value *GetValue(FunctionEmitContext *ctx) const;
     llvm::Value *GetLValue(FunctionEmitContext *ctx) const;
@@ -262,7 +263,7 @@ public:
     Expr *func;
     ExprList *args;
     bool isLaunch;
-    Expr *launchCountExpr;
+    Expr *launchCountExpr[3];
 };
 
 
@@ -634,7 +635,8 @@ private:
     static int computeOverloadCost(const FunctionType *ftype,
                                    const std::vector<const Type *> &argTypes,
                                    const std::vector<bool> *argCouldBeNULL,
-                            const std::vector<bool> *argIsConstant);
+                                   const std::vector<bool> *argIsConstant,
+                                   int * cost);
 
     /** Name of the function that is being called. */
     std::string name;

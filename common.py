@@ -34,7 +34,18 @@
 # // Author: Filippov Ilia
 import sys
 import os
+import errno
 import shutil
+class ExecutionStatGatherer:
+    def __init__(self):
+        optimizations = ['O0', 'O2']
+        architectures = ['x86', 'x86-64']
+        all_est_targets  = ['sse2-i32x4', 'sse2-i32x8', 'sse4-i32x4', 'sse4-i32x8', 'sse4-i16x8',
+                            'sse4-i8x16', 'avx1-i32x8', 'avx1-i32x16', 'avx1.1-i32x8', 
+                            'avx1.1-i32x16', 'avx2-i32x8', 'avx2-i32x16', 'generic-x1', 
+                            'generic-x4', 'generic-x8', 'generic-x16', 'generic-x32', 
+                            'generic-x64', 'knc']
+
 
 def write_to_file(filename, line):
     f = open(filename, 'a')
@@ -48,6 +59,14 @@ def remove_if_exists(filename):
             shutil.rmtree(filename)
         else:
             os.remove(filename)
+
+def make_sure_dir_exists(path):
+    try:
+        os.makedirs(path)
+    except OSError as exception:
+        if exception.errno != errno.EEXIST:
+            raise
+
 
 # detect version which is printed after command
 def take_lines(command, which):
@@ -121,4 +140,7 @@ def check_tools(m):
                         if int(t11[j])<input_tools[t][0][j]:
                             error(input_tools[t][2], m)
                             ret = 0
+                            break
+                        if int(t11[j])>input_tools[t][0][j]:
+                            break
     return ret
