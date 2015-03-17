@@ -56,7 +56,7 @@
 #include <list>
 #include <set>
 #include <stdio.h>
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include <llvm/Module.h>
   #include <llvm/Type.h>
   #include <llvm/Instructions.h>
@@ -74,7 +74,7 @@
   #include <llvm/IR/CallingConv.h>
 #endif
 #include <llvm/ExecutionEngine/GenericValue.h>
-#if defined(LLVM_3_5)
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
   #include <llvm/IR/InstIterator.h>
 #else
   #include <llvm/Support/InstIterator.h>
@@ -3184,14 +3184,7 @@ static llvm::Value *
 lEmitVaryingSelect(FunctionEmitContext *ctx, llvm::Value *test,
                    llvm::Value *expr1, llvm::Value *expr2,
                    const Type *type) {
-#if 0 // !defined(LLVM_3_1)
-    // Though it should be equivalent, this seems to cause non-trivial
-    // performance regressions versus the below.  This may be related to
-    // http://llvm.org/bugs/show_bug.cgi?id=16941.
-    if (test->getType() != LLVMTypes::Int1VectorType)
-        test = ctx->TruncInst(test, LLVMTypes::Int1VectorType);
-    return ctx->SelectInst(test, expr1, expr2, "select");
-#else
+    
     llvm::Value *resultPtr = ctx->AllocaInst(expr1->getType(), "selectexpr_tmp");
     // Don't need to worry about masking here
     ctx->StoreInst(expr2, resultPtr);
@@ -3200,7 +3193,6 @@ lEmitVaryingSelect(FunctionEmitContext *ctx, llvm::Value *test,
            PointerType::GetUniform(type)->LLVMType(g->ctx));
     ctx->StoreInst(expr1, resultPtr, test, type, PointerType::GetUniform(type));
     return ctx->LoadInst(resultPtr, "selectexpr_final");
-#endif // !LLVM_3_1
 }
 
 
@@ -7749,6 +7741,19 @@ AddressOfExpr::GetType() const {
 }
 
 
+const Type *
+AddressOfExpr::GetLValueType() const {
+    if (!expr)
+        return NULL;
+
+    const Type *type = expr->GetType();
+    if (!type)
+        return NULL;
+
+    return PointerType::GetUniform(type);
+}
+
+
 Symbol *
 AddressOfExpr::GetBaseSymbol() const {
     return expr ? expr->GetBaseSymbol() : NULL;
@@ -7880,6 +7885,14 @@ SizeOfExpr::TypeCheck() {
               "struct type \"%s\".", type->GetString().c_str());
         return NULL;
     }
+#ifdef ISPC_NVPTX_ENABLED
+    if (type != NULL)
+      if (g->target->getISA() == Target::NVPTX && type->IsVaryingType())
+      {
+        Error(pos, "\"sizeof\" with varying data types is not yet supported with \"nvptx\" target.");
+        return NULL;
+      }
+#endif /* ISPC_NVPTX_ENABLED */
 
     return this;
 }
@@ -8712,6 +8725,13 @@ NewExpr::TypeCheck() {
         AssertPos(pos, m->errorCount > 0);
         return NULL;
     }
+#ifdef ISPC_NVPTX_ENABLED
+    if (g->target->getISA() == Target::NVPTX && allocType->IsVaryingType())
+    {
+      Error(pos, "\"new\" with varying data types is not yet supported with \"nvptx\" target.");
+      return NULL;
+    }
+#endif /* ISPC_NVPTX_ENABLED */
     if (CastType<UndefinedStructType>(allocType) != NULL) {
         Error(pos, "Can't dynamically allocate storage for declared "
               "but not defined type \"%s\".", allocType->GetString().c_str());

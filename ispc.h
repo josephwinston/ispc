@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2014, Intel Corporation
+  Copyright (c) 2010-2015, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -38,10 +38,10 @@
 #ifndef ISPC_H
 #define ISPC_H
 
-#define ISPC_VERSION "1.7.1dev"
+#define ISPC_VERSION "1.8.2dev"
 
-#if !defined(LLVM_3_1) && !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) && !defined(LLVM_3_5)
-#error "Only LLVM 3.1, 3.2, 3.3, 3.4 and the 3.5 development branch are supported"
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) && !defined(LLVM_3_5) && !defined(LLVM_3_6) && !defined(LLVM_3_7)
+#error "Only LLVM 3.2, 3.3, 3.4, 3.5, 3.6 and 3.7 development branch are supported"
 #endif
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -76,11 +76,7 @@ namespace llvm {
     class BasicBlock;
     class Constant;
     class ConstantValue;
-#if defined(LLVM_3_1)
-    class TargetData;
-#else
     class DataLayout;
-#endif
     class DIBuilder;
     class DIDescriptor;
     class DIFile;
@@ -180,11 +176,20 @@ public:
         also that __best_available_isa() needs to be updated if ISAs are
         added or the enumerant values are reordered.  */
     enum ISA {
-#ifdef ISPC_ARM_ENABLED
-               NEON32, NEON16, NEON8,
+        SSE2    = 0,
+        SSE4    = 1,
+        AVX     = 2,
+        AVX11   = 3,
+        AVX2    = 4,
+        GENERIC = 5,
+#ifdef ISPC_NVPTX_ENABLED
+        NVPTX,
 #endif
-               SSE2, SSE4, AVX, AVX11, AVX2, GENERIC,
-               NUM_ISAS };
+#ifdef ISPC_ARM_ENABLED
+        NEON32, NEON16, NEON8,
+#endif
+        NUM_ISAS
+    };
 
     /** Initializes the given Target pointer for a target of the given
         name, if the name is a known target.  Returns true if the
@@ -241,11 +246,7 @@ public:
 
     // Note the same name of method for 3.1 and 3.2+, this allows
     // to reduce number ifdefs on client side.
-#if defined(LLVM_3_1)
-    llvm::TargetData *getDataLayout() const {return m_targetData;}
-#else
     llvm::DataLayout *getDataLayout() const {return m_dataLayout;}
-#endif
 
     /** Reports if Target object has valid state. */
     bool isValid() const {return m_valid;}
@@ -288,6 +289,8 @@ public:
     
     bool hasRcpd() const {return m_hasRcpd;}
 
+    bool hasVecPrefetch() const {return m_hasVecPrefetch;}
+
 private:
 
     /** llvm Target object representing this target. */
@@ -302,12 +305,7 @@ private:
         must not be used.
         */
     llvm::TargetMachine *m_targetMachine;
-
-#if defined(LLVM_3_1)
-    llvm::TargetData *m_targetData;
-#else
     llvm::DataLayout *m_dataLayout;
-#endif
 
     /** flag to report invalid state after construction
         (due to bad parameters passed to constructor). */
@@ -328,7 +326,7 @@ private:
     /** Target-specific attribute string to pass along to the LLVM backend */
     std::string m_attributes;
 
-#if !defined(LLVM_3_1) && !defined(LLVM_3_2)
+#if !defined(LLVM_3_2)
     /** Target-specific LLVM attribute, which has to be attached to every
         function to ensure that it is generated for correct target architecture.
         This is requirement was introduced in LLVM 3.3 */
@@ -395,6 +393,9 @@ private:
     
     /** Indicates whether there is an ISA double precision rcp. */
     bool m_hasRcpd;
+
+    /** Indicates whether the target has hardware instruction for vector prefetch. */
+    bool m_hasVecPrefetch;
 };
 
 
@@ -611,6 +612,9 @@ struct Globals {
     /** Indicates that alignment in memory allocation routines should be
         forced to have given value. -1 value means natural alignment for the platforms. */
     int forceAlignment;
+
+    /** When true, flag non-static functions with dllexport attribute on Windows. */
+    bool dllExport;
 };
 
 enum {

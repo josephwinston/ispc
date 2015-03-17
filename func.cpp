@@ -46,7 +46,10 @@
 #include "util.h"
 #include <stdio.h>
 
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2)
+#ifdef ISPC_NVPTX_ENABLED
+  #include <llvm/Metadata.h>
+#endif /* ISPC_NVPTX_ENABLED */
   #include <llvm/LLVMContext.h>
   #include <llvm/Module.h>
   #include <llvm/Type.h>
@@ -54,6 +57,9 @@
   #include <llvm/Intrinsics.h>
   #include <llvm/DerivedTypes.h>
 #else
+#ifdef ISPC_NVPTX_ENABLED
+  #include <llvm/IR/Metadata.h>
+#endif /* ISPC_NVPTX_ENABLED */
   #include <llvm/IR/LLVMContext.h>
   #include <llvm/IR/Module.h>
   #include <llvm/IR/Type.h>
@@ -61,15 +67,18 @@
   #include <llvm/IR/Intrinsics.h>
   #include <llvm/IR/DerivedTypes.h>
 #endif
-#include <llvm/PassManager.h>
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+  #include "llvm/PassManager.h"
+#else // LLVM 3.7+
+  #include "llvm/IR/LegacyPassManager.h"
+#endif
 #include <llvm/PassRegistry.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Support/FormattedStream.h>
 #include <llvm/Support/FileUtilities.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
-#include <llvm/PassManager.h>
-#if defined(LLVM_3_5)
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
     #include <llvm/IR/Verifier.h>
     #include <llvm/IR/IRPrintingPasses.h>
     #include <llvm/IR/CFG.h>
@@ -129,7 +138,11 @@ Function::Function(Symbol *s, Stmt *c) {
             sym->parentFunction = this;
     }
 
-    if (type->isTask) {
+    if (type->isTask
+#ifdef ISPC_NVPTX_ENABLED
+        && (g->target->getISA() != Target::NVPTX) 
+#endif
+       ){
         threadIndexSym = m->symbolTable->LookupVariable("threadIndex");
         Assert(threadIndexSym);
         threadCountSym = m->symbolTable->LookupVariable("threadCount");
@@ -240,7 +253,11 @@ Function::emitCode(FunctionEmitContext *ctx, llvm::Function *function,
 #endif
     const FunctionType *type = CastType<FunctionType>(sym->type);
     Assert(type != NULL);
-    if (type->isTask == true) {
+    if (type->isTask == true
+#ifdef ISPC_NVPTX_ENABLED
+        && (g->target->getISA() != Target::NVPTX) 
+#endif 
+       ){
         // For tasks, there should always be three parameters: the
         // pointer to the structure that holds all of the arguments, the
         // thread index, and the thread count variables.
@@ -338,6 +355,18 @@ Function::emitCode(FunctionEmitContext *ctx, llvm::Function *function,
             ctx->SetFunctionMask(argIter);
             Assert(++argIter == function->arg_end());
         }
+#ifdef ISPC_NVPTX_ENABLED
+        if (type->isTask == true && g->target->getISA() == Target::NVPTX)
+        {
+          llvm::NamedMDNode* annotations =
+            m->module->getOrInsertNamedMetadata("nvvm.annotations");
+          llvm::SmallVector<llvm::Value*, 3> av;
+          av.push_back(function);
+          av.push_back(llvm::MDString::get(*g->ctx, "kernel"));
+          av.push_back(LLVMInt32(1));
+          annotations->addOperand(llvm::MDNode::get(*g->ctx, av));
+        }
+#endif /* ISPC_NVPTX_ENABLED */
     }
 
     // Finally, we can generate code for the function
@@ -355,9 +384,7 @@ Function::emitCode(FunctionEmitContext *ctx, llvm::Function *function,
         // isn't worth the code bloat / overhead.
         bool checkMask = (type->isTask == true) ||
             (
-#if defined(LLVM_3_1)
-              (function->hasFnAttr(llvm::Attribute::AlwaysInline) == false)
-#elif defined(LLVM_3_2)
+#if defined(LLVM_3_2)
               (function->getFnAttributes().hasAttribute(llvm::Attributes::AlwaysInline) == false)
 #else // LLVM 3.3+
               (function->getAttributes().getFnAttributes().hasAttribute(llvm::AttributeSet::FunctionIndex, llvm::Attribute::AlwaysInline) == false)
@@ -478,7 +505,8 @@ Function::GenerateIR() {
     }
 
     if (m->errorCount == 0) {
-#if defined (LLVM_3_5)
+
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
         if (llvm::verifyFunction(*function) == true) {
 #else
         if (llvm::verifyFunction(*function, llvm::ReturnStatusAction) == true) {
@@ -500,13 +528,25 @@ Function::GenerateIR() {
                 std::string functionName = sym->name;
                 if (g->mangleFunctionsWithTarget)
                     functionName += std::string("_") + g->target->GetISAString();
+#ifdef ISPC_NVPTX_ENABLED
+                if (g->target->getISA() == Target::NVPTX)
+                {
+                  functionName += std::string("___export");  /* add ___export to the end, for ptxcc to recognize it is exported */
+#if 0
+                  llvm::NamedMDNode* annotations =
+                    m->module->getOrInsertNamedMetadata("nvvm.annotations");
+                  llvm::SmallVector<llvm::Value*, 3> av;
+                  av.push_back(function);
+                  av.push_back(llvm::MDString::get(*g->ctx, "kernel"));
+                  av.push_back(llvm::ConstantInt::get(llvm::IntegerType::get(*g->ctx,32), 1));
+                  annotations->addOperand(llvm::MDNode::get(*g->ctx, av)); 
+#endif
+                }
+#endif /* ISPC_NVPTX_ENABLED */
                 llvm::Function *appFunction =
                     llvm::Function::Create(ftype, linkage, functionName.c_str(), m->module);
-#if defined(LLVM_3_1)
-                appFunction->setDoesNotThrow(true);
-#else
                 appFunction->setDoesNotThrow();
-#endif
+
                 // We should iterate from 1 because zero parameter is return.
                 // We should iterate till getNumParams instead of getNumParams+1 because new
                 // function is export function and doesn't contain the last parameter "mask".
@@ -528,7 +568,8 @@ Function::GenerateIR() {
                     emitCode(&ec, appFunction, firstStmtPos);
                     if (m->errorCount == 0) {
                         sym->exportedFunction = appFunction;
-#if defined(LLVM_3_5)
+
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
                         if (llvm::verifyFunction(*appFunction) == true) {
 #else
                         if (llvm::verifyFunction(*appFunction,
@@ -539,6 +580,18 @@ Function::GenerateIR() {
                             FATAL("Function verificication failed");
                         }
                     }
+#ifdef ISPC_NVPTX_ENABLED
+                    if (g->target->getISA() == Target::NVPTX)
+                    {
+                      llvm::NamedMDNode* annotations =
+                        m->module->getOrInsertNamedMetadata("nvvm.annotations");
+                      llvm::SmallVector<llvm::Value*, 3> av;
+                      av.push_back(appFunction);
+                      av.push_back(llvm::MDString::get(*g->ctx, "kernel"));
+                      av.push_back(llvm::ConstantInt::get(llvm::IntegerType::get(*g->ctx,32), 1));
+                      annotations->addOperand(llvm::MDNode::get(*g->ctx, av)); 
+                    }
+#endif /* ISPC_NVPTX_ENABLED */
                 }
             }
         }
